@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0064ff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="계좌찰칵" />
+  <title>계좌찰칵</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- 1. 촬영 화면 -->
+  <section id="scan" class="screen active">
+    <div class="camera">
+      <video id="video" playsinline muted autoplay></video>
+      <div id="guide" class="guide"><span>은행명과 계좌번호를 네모 안에</span></div>
+      <p id="camera-msg" class="camera-msg" hidden></p>
+      <input id="camfile" type="file" accept="image/*" capture="environment" hidden />
+    </div>
+    <div class="controls">
+      <label class="btn ghost small">
+        사진 선택
+        <input id="file" type="file" accept="image/*" hidden />
+      </label>
+      <button id="shutter" class="shutter" aria-label="촬영"></button>
+      <button id="manual" class="btn ghost small">직접 입력</button>
+    </div>
+    <div id="recent" class="recent" hidden>
+      <h3>최근 계좌</h3>
+      <ul id="recent-list"></ul>
+    </div>
+  </section>
+
+  <!-- 2. 인식 중 -->
+  <section id="busy" class="screen">
+    <img id="preview" alt="" />
+    <div class="spinner"></div>
+    <p id="busy-msg">글자를 읽는 중…</p>
+    <progress id="busy-progress" max="1" value="0"></progress>
+  </section>
+
+  <!-- 3. 결과 -->
+  <section id="result" class="screen">
+    <header class="bar">
+      <button id="back" class="icon-btn" aria-label="다시 찍기">‹</button>
+      <h2>송금 정보 확인</h2>
+    </header>
+
+    <div class="card">
+      <div id="candidates" class="chips"></div>
+
+      <label class="field">
+        <span>은행 <em id="bank-hint"></em></span>
+        <select id="bank"></select>
+      </label>
+
+      <label class="field">
+        <span>계좌번호</span>
+        <input id="account" inputmode="numeric" autocomplete="off" placeholder="숫자만 입력" />
+      </label>
+
+      <label class="field">
+        <span>예금주 (참고용)</span>
+        <input id="holder" autocomplete="off" placeholder="선택" />
+      </label>
+
+      <label class="field">
+        <span>금액 (선택)</span>
+        <input id="amount" inputmode="numeric" autocomplete="off" placeholder="0원" />
+      </label>
+      <p class="hint">숫자를 꼭 눈으로 한 번 더 확인하세요. 토스에서 받는 사람 이름이 나오면 맞는 계좌예요.</p>
+    </div>
+
+    <div class="actions">
+      <button id="toss" class="btn primary">토스로 송금하기</button>
+      <div class="row">
+        <button id="copy-acc" class="btn">계좌번호 복사</button>
+        <button id="copy-all" class="btn">은행+계좌 복사</button>
+      </div>
+    </div>
+
+    <details class="raw">
+      <summary>인식된 원문 보기</summary>
+      <pre id="raw-text"></pre>
+    </details>
+  </section>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
