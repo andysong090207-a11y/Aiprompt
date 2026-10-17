@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 열차 앞모습 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,30h28a8,8 0,0 1,8 8v26a8,8 0,0 1,-8 8H40a8,8 0,0 1,-8 -8V38a8,8 0,0 1,8 -8z" />
+    <path
+        android:fillColor="#00A84D"
+        android:pathData="M38,38h32v14H38z" />
+    <path
+        android:fillColor="#00A84D"
+        android:pathData="M42,62m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0M66,62m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,72h6l-4,8h-6zM64,72h6l4,8h-6z" />
+</vector>
