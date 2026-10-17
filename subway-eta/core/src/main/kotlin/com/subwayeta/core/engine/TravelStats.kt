@@ -34,23 +34,29 @@ class RunningStat(var mean: Double = 0.0, var variance: Double = 0.0, var n: Int
 /**
  * 구간 주행 시간과 역별 정차 시간을 실측으로 학습해 저장한다.
  * 출퇴근 시간대(peak)와 그 외(off)를 따로 학습하고, 데이터가 적으면 전체 값 → 기본값 순으로 쓴다.
+ * 추적 서비스와 도착 정보판 화면이 같이 쓰므로 스레드 안전하다.
  */
 class TravelStats(private val zone: ZoneId = ZoneId.of("Asia/Seoul")) {
     private val stats = HashMap<String, RunningStat>()
 
+    @Synchronized
     fun run(route: Route, k: Int, atMillis: Long): Estimate =
         estimate(runKey(route, k), atMillis, route.defaultRunSec(k), RUN_PRIOR_FRACTION)
 
+    @Synchronized
     fun dwell(route: Route, k: Int, atMillis: Long): Estimate =
         estimate(dwellKey(route, k), atMillis, route.station(k).defaultDwellSec, DWELL_PRIOR_FRACTION)
 
     /** 이상치(센서 오인식)는 버린다. 반영하면 true. */
+    @Synchronized
     fun recordRun(route: Route, k: Int, atMillis: Long, sec: Double): Boolean =
         record(runKey(route, k), atMillis, sec, route.defaultRunSec(k), 0.4, 2.5)
 
+    @Synchronized
     fun recordDwell(route: Route, k: Int, atMillis: Long, sec: Double): Boolean =
         record(dwellKey(route, k), atMillis, sec, route.station(k).defaultDwellSec, 0.2, 6.0)
 
+    @Synchronized
     fun sampleCount(): Int = stats.values.sumOf { it.n }
 
     private fun record(key: String, at: Long, sec: Double, default: Double, minF: Double, maxF: Double): Boolean {
@@ -85,10 +91,12 @@ class TravelStats(private val zone: ZoneId = ZoneId.of("Asia/Seoul")) {
         "dwell:${route.line.id}:${route.station(k).id}:${route.direction}"
 
     /** 탭으로 구분한 텍스트로 저장/복원한다. */
+    @Synchronized
     fun serialize(): String = buildString {
         for ((k, s) in stats) append(k).append('\t').append(s.mean).append('\t').append(s.variance).append('\t').append(s.n).append('\n')
     }
 
+    @Synchronized
     fun load(text: String) {
         stats.clear()
         for (line in text.lineSequence()) {

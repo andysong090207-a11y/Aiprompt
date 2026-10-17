@@ -21,6 +21,29 @@ data class Station(
 
 enum class Direction { FORWARD, BACKWARD }
 
+/** [startMin]~[endMin](서비스일 0시 기준 분, 24시 이후는 1440 이상) 동안 [minutes]분 간격. */
+data class Headway(val startMin: Int, val endMin: Int, val minutes: Double)
+
+/**
+ * 운행 패턴: 어느 역에서 어느 역까지 가는 열차가 몇 분 간격으로 다니는지.
+ * 실시간 정보가 없으므로 도착 정보판은 이 패턴과 학습된 구간 시간으로 계산한다.
+ * 순환선에서 [originId] == [terminusId]면 한 바퀴 계속 도는 열차다.
+ */
+data class ServicePattern(
+    val direction: Direction,
+    val originId: String,
+    val terminusId: String,
+    val express: Boolean,
+    /** 표시 이름. null이면 "종착역행". */
+    val label: String?,
+    val firstDepMin: Int,
+    val lastDepMin: Int,
+    val weekday: List<Headway>,
+    val weekend: List<Headway>,
+) {
+    val isLoop: Boolean get() = originId == terminusId
+}
+
 /**
  * 한 노선. [runToNextSec]의 i번째 값은 stations[i] → stations[i+1] 의 기본 주행 시간(초)이고,
  * 순환선이면 마지막 값이 마지막 역 → 첫 역 구간이다. 반대 방향도 같은 값을 쓴다.
@@ -34,6 +57,9 @@ class Line(
     val backwardName: String,
     val stations: List<Station>,
     private val runToNextSec: List<Double>,
+    /** 같은 노선을 여러 파일로 나눈 경우(1호선 경인·경부 방면) 묶는 이름. */
+    val group: String = name,
+    val services: List<ServicePattern> = emptyList(),
 ) {
     init {
         require(stations.size >= 2) { "노선 $id: 역이 2개 이상 필요" }

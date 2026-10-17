@@ -2,6 +2,10 @@
 
 package com.subwayeta.app.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,53 +17,60 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.subwayeta.app.tracking.Favorite
+import com.subwayeta.app.tracking.LineGroup
 import com.subwayeta.app.tracking.SensorAvailability
 import com.subwayeta.app.tracking.TripUiState
+import com.subwayeta.core.board.BoardArrival
+import com.subwayeta.core.board.BoardSection
+import com.subwayeta.core.board.StationBoard
 import com.subwayeta.core.engine.Phase
 import com.subwayeta.core.engine.Prediction
-import com.subwayeta.core.engine.Predictor
 import com.subwayeta.core.engine.StationEta
 import com.subwayeta.core.engine.TravelStats
-import com.subwayeta.core.model.Direction
-import com.subwayeta.core.model.Line
 import com.subwayeta.core.model.Route
+import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 
-data class StartRequest(val lineId: String, val fromIdx: Int, val toIdx: Int, val direction: Direction?, val express: Boolean)
-
 private val clockFormat = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+/** 남은 시간이 이 밀리초 이하이면 빨간 글씨로 표시한다. */
+const val URGENT_MS = 5_000L
 
 fun formatClock(epochMs: Long): String = Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).format(clockFormat)
 
@@ -69,149 +80,319 @@ fun formatCountdown(ms: Long): String {
     return if (s >= 60) "${s / 60}분 ${"%02d".format(s % 60)}초" else "${s}초"
 }
 
-private fun lineColor(line: Line): Color =
-    runCatching { Color(android.graphics.Color.parseColor(line.colorHex)) }.getOrDefault(Color.Gray)
+private fun parseColor(hex: String): Color =
+    runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrDefault(Color.Gray)
+
+/** 0.5초마다 바뀌는 현재 시각. 초가 바뀌는 순간을 놓치지 않도록 반 초 단위로 갱신한다. */
+@Composable
+private fun rememberNow(): Long {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(500L - now % 500L)
+        }
+    }
+    return now
+}
+
+@Composable
+private fun urgentColor(remainingMs: Long): Color =
+    if (remainingMs <= URGENT_MS) MaterialTheme.colorScheme.error else Color.Unspecified
 
 @Composable
 fun AppScreen(
-    lines: List<Line>,
+    groups: List<LineGroup>,
     sensors: SensorAvailability,
+    stats: TravelStats,
     state: TripUiState?,
-    onStart: (StartRequest) -> Unit,
+    favorites: List<Favorite>,
+    onToggleFavorite: (Favorite) -> Unit,
+    onMoveFavoriteUp: (Favorite) -> Unit,
+    onBoard: (BoardArrival) -> Unit,
     onStop: () -> Unit,
     onSetStation: (Int) -> Unit,
+    onSetAlight: (Int) -> Unit,
     onClear: () -> Unit,
 ) {
+    // 지금 보고 있는 역: "그룹\t역id"
+    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    val now = rememberNow()
     Scaffold { padding ->
         val modifier = Modifier
             .fillMaxSize()
             .padding(padding)
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
-        if (state == null) {
-            SetupScreen(lines, sensors, onStart, modifier)
-        } else {
-            TripScreen(state, onStop, onSetStation, onClear, modifier)
+        val target = selected?.split('\t')?.let { (g, id) -> groups.firstOrNull { it.name == g }?.let { it to id } }
+        when {
+            state != null -> TripScreen(state, now, onStop, onSetStation, onSetAlight, onClear, modifier)
+            target != null -> {
+                BackHandler { selected = null }
+                val fav = Favorite(target.first.name, target.second)
+                BoardScreen(
+                    group = target.first,
+                    stationId = target.second,
+                    stats = stats,
+                    now = now,
+                    isFavorite = favorites.any { it.key == fav.key },
+                    onToggleFavorite = { onToggleFavorite(fav) },
+                    onBoard = onBoard,
+                    onBack = { selected = null },
+                    modifier = modifier,
+                )
+            }
+            else -> HomeScreen(
+                groups, sensors, stats, now, favorites,
+                onOpen = { f -> selected = f.key },
+                onRemoveFavorite = onToggleFavorite,
+                onMoveFavoriteUp = onMoveFavoriteUp,
+                modifier = modifier,
+            )
         }
     }
 }
 
+// ---------------- 첫 화면: 즐겨찾기 + 역 찾기 ----------------
+
 @Composable
-private fun SetupScreen(lines: List<Line>, sensors: SensorAvailability, onStart: (StartRequest) -> Unit, modifier: Modifier) {
-    var lineIdx by rememberSaveable { mutableIntStateOf(0) }
-    val line = lines[lineIdx.coerceIn(lines.indices)]
-    var express by rememberSaveable(lineIdx) { mutableStateOf(false) }
-    val names = line.stations.map { if (express && it.expressStop) "${it.name} (급행)" else it.name }
-    var from by rememberSaveable(lineIdx) { mutableIntStateOf(0) }
-    var to by rememberSaveable(lineIdx) { mutableIntStateOf(minOf(5, names.lastIndex)) }
-    // 0: 자동(가까운 쪽), 1: FORWARD, 2: BACKWARD
-    var dirChoice by rememberSaveable(lineIdx) { mutableIntStateOf(0) }
-    val direction = when (dirChoice) {
-        1 -> Direction.FORWARD
-        2 -> Direction.BACKWARD
-        else -> null
-    }
-    val route = remember(line, from, to, direction, express) {
-        runCatching { Route.plan(line, from, to, direction, express) }.getOrNull()
-    }
+private fun HomeScreen(
+    groups: List<LineGroup>,
+    sensors: SensorAvailability,
+    stats: TravelStats,
+    now: Long,
+    favorites: List<Favorite>,
+    onOpen: (Favorite) -> Unit,
+    onRemoveFavorite: (Favorite) -> Unit,
+    onMoveFavoriteUp: (Favorite) -> Unit,
+    modifier: Modifier,
+) {
+    var groupIdx by rememberSaveable { mutableIntStateOf(0) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var editing by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("지하철 도착 예측", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text(
-            "인터넷 없이 가속도·자기장·자이로 센서로 열차의 출발과 정차를 감지하고, " +
-                "구간별로 학습한 시간으로 도착 시각을 초 단위까지 예측합니다.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        if (lines.size > 1) Picker("노선", lines.map { it.name }, lineIdx) { lineIdx = it }
-        Picker("출발역", names, from) { from = it }
-        Picker("도착역", names, to) { to = it }
-        if (line.circular) {
-            Text("방향", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = dirChoice == 0, onClick = { dirChoice = 0 }, label = { Text("가까운 쪽") })
-                FilterChip(selected = dirChoice == 1, onClick = { dirChoice = 1 }, label = { Text(line.forwardName) })
-                FilterChip(selected = dirChoice == 2, onClick = { dirChoice = 2 }, label = { Text(line.backwardName) })
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("즐겨찾기", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            if (favorites.isNotEmpty()) TextButton(onClick = { editing = !editing }) { Text(if (editing) "완료" else "편집") }
+        }
+        if (favorites.isEmpty()) {
+            Text("역 화면에서 ☆를 누르면 여기에 추가됩니다.", style = MaterialTheme.typography.bodySmall)
+        }
+        favorites.forEach { fav ->
+            val group = groups.firstOrNull { it.name == fav.group } ?: return@forEach
+            val station = group.station(fav.stationId) ?: return@forEach
+            FavoriteCard(group, station.name, fav.stationId, stats, now, editing,
+                onOpen = { onOpen(fav) }, onRemove = { onRemoveFavorite(fav) }, onUp = { onMoveFavoriteUp(fav) })
+        }
+
+        HorizontalDivider()
+        Text("역 찾기", style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            groups.forEachIndexed { i, g ->
+                FilterChip(selected = i == groupIdx, onClick = { groupIdx = i }, label = { Text(g.name) })
             }
         }
-        if (line.hasExpress) {
-            Text("열차 종류", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = !express, onClick = { express = false }, label = { Text("일반") })
-                FilterChip(selected = express, onClick = { express = true }, label = { Text("급행") })
-            }
-        }
-        if (route != null) {
-            val preview = remember(route) { Predictor.predict(route, TravelStats(), Phase.AtStation(0, 0L), 0L) }
-            val totalSec = (((preview.destinationArrivalAt ?: 0L) - (preview.departureAt ?: 0L)) / 1000.0).roundToInt()
-            Text(
-                "${line.directionName(route.direction)}${if (route.express) " 급행" else ""} · ${route.lastK}개 역 · " +
-                    "기본값 기준 약 ${totalSec / 60}분 ${totalSec % 60}초",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        } else {
-            val reason = when {
-                from == to -> "출발역과 도착역을 다르게 고르세요."
-                express -> "급행은 급행 정차역(이름 옆에 '급행' 표시)끼리만 고를 수 있습니다."
-                else -> "이 방향으로는 갈 수 없는 경로입니다."
-            }
-            Text(reason, color = MaterialTheme.colorScheme.error)
-        }
-        Button(
-            onClick = { onStart(StartRequest(line.id, from, to, direction, express)) },
-            enabled = route != null,
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("역 이름") },
+            singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("승강장에서 시작") }
-        Text(
-            "열차에 타기 전 승강장에서 시작하면 첫 구간부터 정확합니다. 열차 안에서 시작했다면 " +
-                "추적 화면의 \"현재 역 고치기\"로 방금 지난 역을 알려 주세요.",
-            style = MaterialTheme.typography.bodySmall,
         )
+        val q = query.trim()
+        // 검색어가 있으면 모든 노선에서, 없으면 고른 노선의 역을 보여 준다.
+        val results = if (q.isEmpty()) {
+            groups.getOrNull(groupIdx)?.let { g -> g.stations.map { g to it } }.orEmpty()
+        } else {
+            groups.flatMap { g -> g.stations.filter { it.name.contains(q) }.map { g to it } }
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Column {
+                results.forEachIndexed { i, (g, s) ->
+                    if (i > 0) HorizontalDivider()
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpen(Favorite(g.name, s.id)) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        LineBadge(g)
+                        Spacer(Modifier.width(8.dp))
+                        Text(s.name, modifier = Modifier.weight(1f))
+                        if (s.expressStop) Text("급행", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                if (results.isEmpty()) Text("찾는 역이 없습니다.", Modifier.padding(16.dp))
+            }
+        }
         SensorCard(sensors)
     }
 }
 
 @Composable
-private fun SensorCard(s: SensorAvailability) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("이 폰의 센서", fontWeight = FontWeight.Bold)
-            fun mark(b: Boolean) = if (b) "있음" else "없음"
-            Text("가속도계: ${mark(s.accelerometer)} (필수)")
-            Text("자기장 센서: ${mark(s.magnetometer)} (모터 자기장으로 주행 판단)")
-            Text("자이로스코프: ${mark(s.gyroscope)} (폰 회전 오검출 방지)")
-            Text("걸음 감지: ${mark(s.stepDetector)} (걷기 오검출 방지)")
-            Text("기압계: ${mark(s.barometer)} (사용하지 않음)")
-        }
+private fun LineBadge(group: LineGroup) {
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(parseColor(group.colorHex))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(group.name, color = Color.White, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
     }
 }
 
 @Composable
-private fun Picker(label: String, options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Column {
-        Text(label, style = MaterialTheme.typography.labelMedium)
-        Box {
-            OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
-                Text(options.getOrElse(selected) { "" }, modifier = Modifier.weight(1f))
-                Text("▾")
+private fun FavoriteCard(
+    group: LineGroup,
+    stationName: String,
+    stationId: String,
+    stats: TravelStats,
+    now: Long,
+    editing: Boolean,
+    onOpen: () -> Unit,
+    onRemove: () -> Unit,
+    onUp: () -> Unit,
+) {
+    val sections = remember(now / 1000, stationId) { StationBoard.compute(group.lines, stationId, stats, now, perDirection = 1) }
+    Card(Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LineBadge(group)
+                Spacer(Modifier.width(8.dp))
+                Text(stationName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (editing) {
+                    TextButton(onClick = onUp) { Text("위로") }
+                    TextButton(onClick = onRemove) { Text("삭제", color = MaterialTheme.colorScheme.error) }
+                }
             }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                options.forEachIndexed { i, name ->
-                    DropdownMenuItem(text = { Text(name) }, onClick = {
-                        onSelect(i)
-                        open = false
-                    })
+            sections.forEach { sec ->
+                val a = sec.arrivals.firstOrNull()
+                Row {
+                    Text(a?.label ?: sec.title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    if (a == null) {
+                        Text("운행 없음", style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        CountdownText(a, now, MaterialTheme.typography.bodyMedium.fontSize)
+                    }
                 }
             }
         }
     }
 }
 
+// ---------------- 역 도착 정보판 ----------------
+
+@Composable
+private fun BoardScreen(
+    group: LineGroup,
+    stationId: String,
+    stats: TravelStats,
+    now: Long,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    onBoard: (BoardArrival) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier,
+) {
+    val station = group.station(stationId)
+    val sections: List<BoardSection> = remember(now / 500, stationId) {
+        StationBoard.compute(group.lines, stationId, stats, now)
+    }
+    var confirm by remember { mutableStateOf<BoardArrival?>(null) }
+
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TextButton(onClick = onBack) { Text("← 처음으로") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LineBadge(group)
+            Spacer(Modifier.width(8.dp))
+            Text(station?.name ?: stationId, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onToggleFavorite) {
+                Text(if (isFavorite) "★" else "☆", fontSize = 28.sp, color = if (isFavorite) Color(0xFFFFB300) else Color.Unspecified)
+            }
+        }
+        Text(
+            "현재 ${formatClock(now)} · 운행 패턴과 학습한 구간 시간으로 계산한 추정 시각입니다(실시간 아님).",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        sections.forEach { sec ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(vertical = 8.dp)) {
+                    Text(
+                        sec.title + (sec.nextStation?.let { " · 다음 역 $it" } ?: ""),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                    if (sec.arrivals.isEmpty()) {
+                        Text("오늘 남은 열차가 없습니다.", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    }
+                    sec.arrivals.forEach { a ->
+                        HorizontalDivider()
+                        ArrivalRow(a, now, onClick = { confirm = a })
+                    }
+                }
+            }
+        }
+        Text("열차를 누르면 탑승 후 추적을 시작합니다. 기지국·Wi-Fi 신호로 현재 역을 보정합니다.", style = MaterialTheme.typography.bodySmall)
+    }
+
+    confirm?.let { a ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text("${a.label} 탑승") },
+            text = { Text("${formatClock(a.arriveAt)} 도착 예정 열차입니다. 탑승하면 센서와 무선 신호로 다음 역 도착 시각을 추적합니다.") },
+            confirmButton = {
+                Button(onClick = {
+                    confirm = null
+                    onBoard(a)
+                }) { Text("탑승 시작") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("취소") } },
+        )
+    }
+}
+
+@Composable
+private fun ArrivalRow(a: BoardArrival, now: Long, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(a.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("${formatClock(a.arriveAt)} 도착", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        }
+        CountdownText(a, now, 24.sp)
+    }
+}
+
+/** "3분 12초 후" / 정차 중이면 "정차 중 · 출발 8초". 5초 이하는 빨간색. */
+@Composable
+private fun CountdownText(a: BoardArrival, now: Long, size: androidx.compose.ui.unit.TextUnit) {
+    val toArrive = a.arriveAt - now
+    val (text, remaining) = if (toArrive > 0) {
+        formatCountdown(toArrive) to toArrive
+    } else {
+        "정차 중 · 출발 ${formatCountdown(a.departAt - now)}" to (a.departAt - now)
+    }
+    Text(text, fontSize = size, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = urgentColor(remaining))
+}
+
+// ---------------- 탑승 중 화면 ----------------
+
 @Composable
 private fun TripScreen(
     state: TripUiState,
+    now: Long,
     onStop: () -> Unit,
     onSetStation: (Int) -> Unit,
+    onSetAlight: (Int) -> Unit,
     onClear: () -> Unit,
     modifier: Modifier,
 ) {
@@ -222,24 +403,26 @@ private fun TripScreen(
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-            "${route.line.name} ${route.line.directionName(route.direction)}${if (route.express) " 급행" else ""}",
-            color = lineColor(route.line),
+            "${route.line.group} ${route.line.directionName(route.direction)}${if (route.express) " 급행" else ""}",
+            color = parseColor(route.line.colorHex),
             fontWeight = FontWeight.Bold,
         )
         Text(
-            "${route.station(0).name} → ${route.station(route.lastK).name}",
-            style = MaterialTheme.typography.headlineSmall,
+            "${route.station(0).name}에서 탑승 · ${route.station(route.lastK).name}까지",
+            style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
         )
-        DestinationCard(p, route)
-        StatusCard(p, route)
+        TargetCard(state, now)
+        StatusCard(p, route, now)
 
-        Text("남은 역", style = MaterialTheme.typography.titleMedium)
+        Text("다음 역 (누르면 하차 알림)", style = MaterialTheme.typography.titleMedium)
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(vertical = 4.dp)) {
                 p.stations.forEachIndexed { i, eta ->
                     if (i > 0) HorizontalDivider()
-                    StationRow(eta, p.now, isDestination = eta.k == route.lastK)
+                    StationRow(eta, now, alight = eta.k == state.alightK, onClick = {
+                        if (state.running && !eta.isCurrent) onSetAlight(eta.k)
+                    })
                 }
             }
         }
@@ -249,7 +432,7 @@ private fun TripScreen(
                 OutlinedButton(onClick = { picking = true }, modifier = Modifier.weight(1f)) { Text("현재 역 고치기") }
                 Button(onClick = onStop, modifier = Modifier.weight(1f)) { Text("종료") }
             } else {
-                Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("새 경로") }
+                Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("처음으로") }
             }
         }
         DebugCard(state)
@@ -274,40 +457,59 @@ private fun TripScreen(
     }
 }
 
+/** 하차역을 정했으면 그 역, 아니면 다음 역의 도착 예정 시각을 크게 보여 준다. */
 @Composable
-private fun DestinationCard(p: Prediction, route: Route) {
-    val eta = p.destinationArrivalAt
+private fun TargetCard(state: TripUiState, now: Long) {
+    val p = state.snapshot.prediction
+    val alight = state.alightK
+    val eta = if (alight != null) p.stations.firstOrNull { it.k == alight } else p.stations.firstOrNull { !it.isCurrent }
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
     ) {
         Column(Modifier.padding(16.dp)) {
-            val finished = p.phase is Phase.Finished
-            Text(if (finished) "${route.station(route.lastK).name} 도착" else "${route.station(route.lastK).name} 도착 예정")
+            when {
+                !state.running -> {
+                    val name = (alight?.let { state.snapshot.route.station(it) } ?: state.snapshot.route.station(state.snapshot.route.lastK)).name
+                    Text("$name 도착")
+                }
+                eta == null -> Text("도착")
+                alight != null -> Text("하차역 ${eta.station.name} 도착 예정")
+                else -> Text("다음 역 ${eta.station.name} 도착 예정")
+            }
+            val at = eta?.arriveAt
             Text(
-                eta?.let { formatClock(it) } ?: "--:--:--",
+                at?.let { formatClock(it) } ?: "--:--:--",
                 fontSize = 44.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
             )
-            if (!finished && eta != null) {
-                Text("${formatCountdown(eta - p.now)} 후 · 오차 ±${p.destinationSigmaSec.roundToInt()}초")
+            if (state.running && at != null) {
+                Text(
+                    "${formatCountdown(at - now)} 후 · 오차 ±${(eta?.sigmaSec ?: 0.0).roundToInt()}초",
+                    color = urgentColor(at - now),
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun StatusCard(p: Prediction, route: Route) {
+private fun StatusCard(p: Prediction, route: Route, now: Long) {
+    var remaining = Long.MAX_VALUE
     val (title, detail) = when (val phase = p.phase) {
         is Phase.AtStation -> {
             val name = route.station(phase.k).name
             val dwell = p.stations.firstOrNull()?.dwellSec?.roundToInt() ?: 0
             val dep = p.departureAt
             when {
-                phase.arrivedAt == null && phase.k == 0 -> "$name 에서 열차 출발 대기" to "출발하면 자동으로 감지합니다"
+                phase.arrivedAt == null && phase.k == 0 -> "$name 승강장" to "열차가 출발하면 자동으로 감지합니다"
                 p.overdue || dep == null -> "$name 정차 중" to "곧 출발 (예상 정차 ${dwell}초)"
-                else -> "$name 정차 중" to "출발까지 ${formatCountdown(dep - p.now)} · ${formatClock(dep)} (예상 정차 ${dwell}초)"
+                else -> {
+                    remaining = dep - now
+                    "$name 정차 중" to "출발까지 ${formatCountdown(dep - now)} · ${formatClock(dep)} (예상 정차 ${dwell}초)"
+                }
             }
         }
         is Phase.Running -> {
@@ -317,35 +519,44 @@ private fun StatusCard(p: Prediction, route: Route) {
             val holdingSince = phase.holdingSince
             when {
                 holdingSince != null ->
-                    "$from → $to 사이 정차" to "신호 대기 ${formatCountdown(p.now - holdingSince)} (도착 예측에 반영 중)"
+                    "$from → $to 사이 정차" to "신호 대기 ${formatCountdown(now - holdingSince)} (도착 예측에 반영 중)"
                 p.overdue || next == null -> "$from → $to 운행 중" to "곧 도착"
-                else -> "$from → $to 운행 중" to "$to 도착까지 ${formatCountdown(next - p.now)} · ${formatClock(next)}"
+                else -> {
+                    remaining = next - now
+                    "$from → $to 운행 중" to "$to 도착까지 ${formatCountdown(next - now)} · ${formatClock(next)}"
+                }
             }
         }
-        is Phase.Finished -> "도착했습니다" to formatClock(phase.arrivedAt)
+        is Phase.Finished -> "종착역 도착" to formatClock(phase.arrivedAt)
     }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(detail)
+            Text(detail, color = urgentColor(remaining))
         }
     }
 }
 
 @Composable
-private fun StationRow(eta: StationEta, now: Long, isDestination: Boolean) {
+private fun StationRow(eta: StationEta, now: Long, alight: Boolean, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                eta.station.name + if (eta.isCurrent) " (현재)" else "",
-                fontWeight = if (eta.isCurrent || isDestination) FontWeight.Bold else FontWeight.Normal,
+                eta.station.name + when {
+                    eta.isCurrent -> " (현재)"
+                    alight -> " · 하차"
+                    else -> ""
+                },
+                fontWeight = if (eta.isCurrent || alight) FontWeight.Bold else FontWeight.Normal,
+                color = if (alight) MaterialTheme.colorScheme.primary else Color.Unspecified,
             )
-            if (!isDestination && !eta.isCurrent) {
+            if (!eta.isCurrent && eta.departAt != null) {
                 Text("정차 약 ${eta.dwellSec.roundToInt()}초", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -357,8 +568,27 @@ private fun StationRow(eta: StationEta, now: Long, isDestination: Boolean) {
                 }
             } else eta.arriveAt?.let {
                 Text(formatClock(it), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                Text("${formatCountdown(it - now)} 후 ±${eta.sigmaSec.roundToInt()}초", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "${formatCountdown(it - now)} 후 ±${eta.sigmaSec.roundToInt()}초",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = urgentColor(it - now),
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun SensorCard(s: SensorAvailability) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("이 폰의 센서", fontWeight = FontWeight.Bold)
+            fun mark(b: Boolean) = if (b) "있음" else "없음"
+            Text("가속도계: ${mark(s.accelerometer)} (필수)")
+            Text("자기장 센서: ${mark(s.magnetometer)} (모터 자기장으로 주행 판단)")
+            Text("자이로스코프: ${mark(s.gyroscope)} (폰 회전 오검출 방지)")
+            Text("걸음 감지: ${mark(s.stepDetector)} (걷기 오검출 방지)")
+            Text("기압계: ${mark(s.barometer)} (사용하지 않음)")
         }
     }
 }
@@ -368,14 +598,24 @@ private fun DebugCard(state: TripUiState) {
     val snap = state.snapshot
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("센서 상태", fontWeight = FontWeight.Bold)
+            Text("센서·무선 신호", fontWeight = FontWeight.Bold)
             val f = snap.features
-            Text("움직임: ${snap.motionState}${if (f?.walking == true) " (걷는 중)" else ""} · GPS ${if (state.gpsActive) "켜짐" else "꺼짐"} · 학습 ${snap.learnedSamples}회")
+            Text("움직임: ${snap.motionState}${if (f?.walking == true) " (걷는 중)" else ""} · GPS ${if (state.gpsActive) "켜짐" else "꺼짐"} · 구간 학습 ${snap.learnedSamples}회")
             if (f != null) {
                 Text(
                     "진동 %.3f · 자기장 %.2f · 가속 %.2f · 점수 %.2f/%.2f".format(f.vibration, f.magStd, f.sustained, f.score, f.stillScore),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
+                )
+            }
+            val r = snap.radio
+            if (r == null) {
+                Text("무선 신호: 스캔 대기 중", style = MaterialTheme.typography.bodySmall)
+            } else {
+                val best = r.best?.let { " · 가장 닮은 역 ${it.station.name} ${(it.score * 100).roundToInt()}%${if (it.nameMatched) " (Wi-Fi 이름)" else ""}" } ?: ""
+                Text(
+                    "기지국 ${r.cells}개 · Wi-Fi ${r.wifi}개$best · 신호를 학습한 역 ${r.learnedStations}곳",
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
             snap.logs.takeLast(8).asReversed().forEach {

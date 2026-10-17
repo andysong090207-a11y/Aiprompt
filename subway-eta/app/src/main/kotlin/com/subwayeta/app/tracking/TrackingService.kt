@@ -33,13 +33,13 @@ import com.subwayeta.app.R
 import com.subwayeta.app.ui.MainActivity
 import com.subwayeta.app.ui.formatClock
 import com.subwayeta.core.engine.Phase
-import com.subwayeta.core.engine.TravelStats
 import com.subwayeta.core.engine.TripSession
 import com.subwayeta.core.engine.TripSnapshot
 import com.subwayeta.core.model.Direction
 import com.subwayeta.core.model.Route
 import com.subwayeta.core.motion.MotionEvent
 import com.subwayeta.core.motion.MotionFeatures
+import com.subwayeta.core.radio.RadioObservation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,7 +67,9 @@ class TrackingService : Service(), SensorEventListener {
 
     private var sensorThread: HandlerThread? = null
     private var session: TripSession? = null
-    private var stats: TravelStats? = null
+    private var radioScanner: RadioScanner? = null
+    private var lastFingerprintSave = 0L
+    private var alightK: Int? = null
     private var tickerJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var logWriter: BufferedWriter? = null
@@ -110,6 +112,13 @@ class TrackingService : Service(), SensorEventListener {
                 synchronized(lock) { session?.takeIf { k in 0..it.route.lastK }?.setCurrentStation(k, now()) }
                 tick()
             }
+            ACTION_SET_ALIGHT -> {
+                val k = intent.getIntExtra(EXTRA_STATION_K, -1)
+                val lastK = synchronized(lock) { session?.route?.lastK } ?: -1
+                alightK = k.takeIf { it in 1..lastK && it != alightK }
+                alertedApproach = false
+                tick()
+            }
         }
         return START_NOT_STICKY
     }
@@ -137,7 +146,7 @@ class TrackingService : Service(), SensorEventListener {
         }
 
         try {
-            startForeground(NOTIFICATION_ID, tripNotification("${route.station(route.lastK).name} 도착 예측 준비 중", null, null), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            startForeground(NOTIFICATION_ID, tripNotification("${route.station(0).name}에서 탑승 준비 중", null, null), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } catch (e: SecurityException) {
             Log.e(TAG, "위치 권한 없이 포그라운드 서비스를 시작할 수 없음", e)
             stopSelf()
@@ -145,7 +154,9 @@ class TrackingService : Service(), SensorEventListener {
         }
 
         bootToEpochMs = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-        val st = stats ?: loadStats().also { stats = it }
+        val st = TripRepository.stats(this)
+        val fps = TripRepository.fingerprints(this)
+        alightK = null
         alertedApproach = false
         lastNotificationText = ""
         openLog(route)
@@ -154,8 +165,10 @@ class TrackingService : Service(), SensorEventListener {
                 route = route,
                 stats = st,
                 startAt = now(),
-                onLearned = ::saveStats,
+                onLearned = { TripRepository.saveStats(this) },
                 onEvent = ::logEvent,
+                fingerprints = fps,
+                onRadioLearned = ::saveFingerprintsThrottled,
             ).also { it.featuresListener = ::logFeatures }
         }
 
@@ -171,6 +184,7 @@ class TrackingService : Service(), SensorEventListener {
             sensorManager.getDefaultSensor(type)?.let { sensorManager.registerListener(this, it, period, 0, handler) }
         }
 
+        radioScanner = RadioScanner(this, handler, { bootToEpochMs }, ::handleRadio).also { it.start() }
         startPassiveLocation()
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SubwayEta:trip")
@@ -188,6 +202,8 @@ class TrackingService : Service(), SensorEventListener {
         tickerJob?.cancel()
         tickerJob = null
         sensorManager.unregisterListener(this)
+        radioScanner?.stop()
+        radioScanner = null
         sensorThread?.quitSafely()
         sensorThread = null
         setGps(false)
@@ -197,7 +213,12 @@ class TrackingService : Service(), SensorEventListener {
         }
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null
-        synchronized(lock) { session = null }
+        val hadSession = synchronized(lock) {
+            val had = session != null
+            session = null
+            had
+        }
+        if (hadSession) TripRepository.saveFingerprints(this)
         closeLog()
         if (clearState) TripRepository.publish(null)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -210,9 +231,12 @@ class TrackingService : Service(), SensorEventListener {
             s.snapshot(now) to s.wantsGps(now)
         }
         setGps(wantsGps)
-        val finished = snap.prediction.phase is Phase.Finished
-        TripRepository.publish(TripUiState(snap, gpsActive, running = !finished))
-        handleAlerts(snap)
+        val phase = snap.prediction.phase
+        val alight = alightK
+        val finished = phase is Phase.Finished ||
+            (alight != null && phase is Phase.AtStation && phase.k >= alight && phase.arrivedAt != null)
+        TripRepository.publish(TripUiState(snap, gpsActive, running = !finished, alightK = alight))
+        handleAlerts(snap, finished)
         if (finished) {
             stopTrip(clearState = false)
             stopSelf()
@@ -221,17 +245,19 @@ class TrackingService : Service(), SensorEventListener {
         }
     }
 
-    private fun handleAlerts(snap: TripSnapshot) {
+    /** 하차역을 정했으면 그 역, 아니면 종착역 기준으로 알린다. */
+    private fun handleAlerts(snap: TripSnapshot, finished: Boolean) {
         val route = snap.route
-        val dest = route.station(route.lastK).name
-        when (val phase = snap.prediction.phase) {
-            is Phase.Running -> if (!alertedApproach && phase.fromK == route.lastK - 1) {
-                alertedApproach = true
-                val eta = snap.prediction.destinationArrivalAt?.let { " (${formatClock(it)} 도착 예정)" } ?: ""
-                alert("다음 역 $dest 에서 내리세요$eta")
-            }
-            is Phase.Finished -> alert("$dest 도착 · ${formatClock(phase.arrivedAt)}")
-            is Phase.AtStation -> Unit
+        val target = alightK ?: route.lastK
+        val dest = route.station(target).name
+        val phase = snap.prediction.phase
+        if (finished) {
+            val at = (phase as? Phase.Finished)?.arrivedAt ?: (phase as? Phase.AtStation)?.arrivedAt ?: now()
+            alert("$dest 도착 · ${formatClock(at)}")
+        } else if (phase is Phase.Running && !alertedApproach && phase.fromK == target - 1) {
+            alertedApproach = true
+            val eta = snap.prediction.stations.firstOrNull { it.k == target }?.arriveAt
+            alert("다음 역 $dest 에서 내리세요${eta?.let { " (${formatClock(it)} 도착 예정)" } ?: ""}")
         }
     }
 
@@ -252,8 +278,14 @@ class TrackingService : Service(), SensorEventListener {
     private fun updateNotification(snap: TripSnapshot) {
         val p = snap.prediction
         val route = snap.route
-        val eta = p.destinationArrivalAt
-        val title = "${route.station(route.lastK).name} ${eta?.let { formatClock(it) } ?: "--:--:--"} 도착 예정"
+        val alight = alightK
+        val (targetName, eta) = if (alight != null) {
+            route.station(alight).name to p.stations.firstOrNull { it.k == alight }?.arriveAt
+        } else {
+            val next = p.stations.firstOrNull { !it.isCurrent }
+            (next?.station?.name ?: route.station(route.lastK).name) to next?.arriveAt
+        }
+        val title = "$targetName ${eta?.let { formatClock(it) } ?: "--:--:--"} 도착 예정"
         val text = when (val phase = p.phase) {
             is Phase.AtStation -> "${route.station(phase.k).name} 정차 중 · 출발 ${p.departureAt?.let { formatClock(it) } ?: "-"}"
             is Phase.Running -> "${route.station(phase.fromK).name} → ${route.station(phase.fromK + 1).name} · " +
@@ -346,24 +378,22 @@ class TrackingService : Service(), SensorEventListener {
         if (corrected) tick()
     }
 
-    // ---- 학습값 저장, 기록 ----
+    // ---- 무선 신호 ----
 
-    private fun statsFile() = File(filesDir, "travel_stats.tsv")
-
-    private fun loadStats() = TravelStats().apply {
-        runCatching { statsFile().takeIf { it.exists() }?.readText()?.let(::load) }
-            .onFailure { Log.w(TAG, "학습값을 읽지 못함", it) }
+    private fun handleRadio(obs: RadioObservation) {
+        val corrected = synchronized(lock) { session?.onRadio(obs) ?: false }
+        if (corrected) scope.launch { tick() }
     }
 
-    /** 센서 스레드에서 lock을 잡은 채로 불린다. 파일이 작아서 바로 쓴다. */
-    private fun saveStats() {
-        val s = stats ?: return
-        runCatching {
-            val tmp = File(filesDir, "travel_stats.tsv.tmp")
-            tmp.writeText(s.serialize())
-            tmp.renameTo(statsFile())
-        }.onFailure { Log.w(TAG, "학습값 저장 실패", it) }
+    /** 정차할 때마다(10초 주기) 학습하므로 저장은 1분에 한 번만. 종료할 때 마지막으로 저장한다. */
+    private fun saveFingerprintsThrottled() {
+        val t = SystemClock.elapsedRealtime()
+        if (t - lastFingerprintSave < 60_000L) return
+        lastFingerprintSave = t
+        TripRepository.saveFingerprints(this)
     }
+
+    // ---- 기록 ----
 
     /**
      * 임계값 튜닝용 기록. adb pull /sdcard/Android/data/com.subwayeta.app/files/logs 로 꺼낼 수 있다.
@@ -413,6 +443,7 @@ class TrackingService : Service(), SensorEventListener {
         const val ACTION_START = "com.subwayeta.app.START"
         const val ACTION_STOP = "com.subwayeta.app.STOP"
         const val ACTION_SET_STATION = "com.subwayeta.app.SET_STATION"
+        const val ACTION_SET_ALIGHT = "com.subwayeta.app.SET_ALIGHT"
         const val EXTRA_LINE = "line"
         const val EXTRA_FROM = "from"
         const val EXTRA_TO = "to"
@@ -433,6 +464,11 @@ class TrackingService : Service(), SensorEventListener {
 
         fun stop(context: Context) {
             context.startService(Intent(context, TrackingService::class.java).setAction(ACTION_STOP))
+        }
+
+        /** 하차 알림 역을 정한다. 이미 정한 역을 다시 고르면 해제한다. */
+        fun setAlight(context: Context, k: Int) {
+            context.startService(Intent(context, TrackingService::class.java).setAction(ACTION_SET_ALIGHT).putExtra(EXTRA_STATION_K, k))
         }
 
         fun setCurrentStation(context: Context, k: Int) {

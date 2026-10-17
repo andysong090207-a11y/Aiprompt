@@ -6,6 +6,19 @@ import com.subwayeta.core.motion.MotionConfig
 import com.subwayeta.core.motion.MotionEvent
 import com.subwayeta.core.motion.MotionFeatures
 import com.subwayeta.core.motion.MotionState
+import com.subwayeta.core.radio.RadioFingerprints
+import com.subwayeta.core.radio.RadioMatch
+import com.subwayeta.core.radio.RadioObservation
+import kotlin.math.max
+import kotlin.math.min
+
+data class RadioStatus(
+    val atMillis: Long,
+    val cells: Int,
+    val wifi: Int,
+    val best: RadioMatch?,
+    val learnedStations: Int,
+)
 
 data class TripSnapshot(
     val route: Route,
@@ -14,6 +27,7 @@ data class TripSnapshot(
     val features: MotionFeatures?,
     val logs: List<TrackLog>,
     val learnedSamples: Int,
+    val radio: RadioStatus?,
 )
 
 /**
@@ -27,7 +41,11 @@ class TripSession(
     motionConfig: MotionConfig = MotionConfig(),
     private val onLearned: () -> Unit = {},
     private val onEvent: (MotionEvent) -> Unit = {},
+    val fingerprints: RadioFingerprints = RadioFingerprints(),
+    private val onRadioLearned: () -> Unit = {},
 ) {
+    private var radioStatus: RadioStatus? = null
+    private var pendingRadioK: Int? = null
     private val logs = ArrayDeque<TrackLog>()
     private val classifier = MotionClassifier(motionConfig)
     val tracker = TripTracker(route, stats, startAt, onLog = ::addLog, onLearned = { onLearned() })
@@ -58,6 +76,45 @@ class TripSession(
     fun onLocation(lat: Double, lon: Double, accuracyM: Double, t: Long): Boolean =
         tracker.onLocation(lat, lon, accuracyM, t, stationary = classifier.state == MotionState.STOPPED)
 
+    /**
+     * 기지국·Wi-Fi 스캔 결과. 멈춰 있을 때만 쓴다.
+     * 1) 앞뒤 몇 역 중 다른 역과 확실히 더 닮았고, 두 번 연속 같은 결과면 그 역으로 보정한다.
+     * 2) 아니면 지금 정차 중인 역의 신호로 학습한다.
+     * 보정했으면 true.
+     */
+    fun onRadio(obs: RadioObservation): Boolean {
+        val cur = tracker.currentK() ?: return false
+        if (classifier.state != MotionState.STOPPED || obs.isEmpty) {
+            pendingRadioK = null
+            radioStatus = RadioStatus(obs.atMillis, obs.cells.size, obs.wifi.size, null, fingerprints.learnedStations())
+            return false
+        }
+        val range = max(0, cur - 1)..min(route.lastK, cur + RADIO_LOOKAHEAD)
+        val matches = fingerprints.match(range.map { route.station(it) }, obs)
+        val best = matches.firstOrNull()
+        radioStatus = RadioStatus(obs.atMillis, obs.cells.size, obs.wifi.size, best, fingerprints.learnedStations())
+        val curScore = matches.firstOrNull { it.station == route.station(cur) }?.score ?: 0.0
+        val bestK = best?.let { b -> range.first { route.station(it) == b.station } }
+        if (best != null && bestK != null && bestK != cur &&
+            best.score >= RADIO_MIN_SCORE && best.score - curScore >= RADIO_MIN_MARGIN
+        ) {
+            if (pendingRadioK == bestK) {
+                pendingRadioK = null
+                val why = if (best.nameMatched) "Wi-Fi 이름" else "무선 신호 %.0f%% 일치".format(best.score * 100)
+                return tracker.snapTo(bestK, obs.atMillis, "$why 보정")
+            }
+            pendingRadioK = bestK
+            return false
+        }
+        pendingRadioK = null
+        val p = tracker.phase
+        if (p is Phase.AtStation) {
+            fingerprints.learn(route.station(p.k).id, obs)
+            onRadioLearned()
+        }
+        return false
+    }
+
     fun setCurrentStation(k: Int, t: Long) =
         tracker.setCurrentStation(k, t, moving = classifier.state == MotionState.MOVING)
 
@@ -84,6 +141,7 @@ class TripSession(
         features = classifier.latest,
         logs = logs.toList(),
         learnedSamples = stats.sampleCount(),
+        radio = radioStatus,
     )
 
     private fun addLog(l: TrackLog) {
@@ -94,5 +152,8 @@ class TripSession(
     companion object {
         const val GPS_STARTUP_MS = 60_000L
         const val MAX_LOGS = 30
+        const val RADIO_LOOKAHEAD = 3
+        const val RADIO_MIN_SCORE = 0.45
+        const val RADIO_MIN_MARGIN = 0.2
     }
 }

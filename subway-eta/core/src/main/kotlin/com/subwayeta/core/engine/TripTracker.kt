@@ -129,12 +129,24 @@ class TripTracker(
             .map { it to distanceMeters(lat, lon, route.station(it).lat, route.station(it).lon) }
             .filter { it.second <= radius }
             .minByOrNull { it.second } ?: return false
-        val j = near.first
+        return snapTo(near.first, t, "GPS 보정 (${near.second.toInt()}m, 정확도 ${accuracyM.toInt()}m)")
+    }
+
+    /** 멈춰 있는 상태에서 다른 근거(GPS, 무선 신호)로 j번째 역에 있다고 확인됐을 때. 바뀌었으면 true. */
+    fun snapTo(j: Int, t: Long, reason: String): Boolean {
+        require(j in 0..route.lastK)
         val p = phase
-        if (p is Phase.AtStation && p.k == j) return false
-        log(t, "GPS 보정: ${route.station(j).name} (${near.second.toInt()}m, 정확도 ${accuracyM.toInt()}m)")
+        if (p is Phase.Finished || (p is Phase.AtStation && p.k == j)) return false
+        log(t, "$reason: ${route.station(j).name}")
         phase = if (j >= route.lastK) Phase.Finished(t) else Phase.AtStation(j, if (p is Phase.Running) t else null)
         return true
+    }
+
+    /** 정차 중이면 그 역, 달리는 중이면 막 떠난 역. 끝났으면 null. */
+    fun currentK(): Int? = when (val p = phase) {
+        is Phase.AtStation -> p.k
+        is Phase.Running -> p.fromK
+        is Phase.Finished -> null
     }
 
     /** 사용자가 직접 "지금 이 역"을 고쳤을 때. */

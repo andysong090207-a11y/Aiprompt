@@ -19,44 +19,57 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.subwayeta.app.tracking.SensorAvailability
 import com.subwayeta.app.tracking.TrackingService
 import com.subwayeta.app.tracking.TripRepository
+import com.subwayeta.core.board.BoardArrival
 
 class MainActivity : ComponentActivity() {
-    private var pendingStart: StartRequest? = null
+    private var pendingBoard: BoardArrival? = null
 
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        val request = pendingStart ?: return@registerForActivityResult
-        pendingStart = null
+        val arrival = pendingBoard ?: return@registerForActivityResult
+        pendingBoard = null
         if (granted(Manifest.permission.ACCESS_FINE_LOCATION)) {
-            startTrip(request)
+            startTrip(arrival)
         } else {
-            Toast.makeText(this, "정확한 위치 권한이 필요합니다. 지상 구간에서 현재 역을 보정하는 데만 씁니다.", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "정확한 위치 권한이 필요합니다. 기지국·Wi-Fi 신호와 GPS로 현재 역을 보정하는 데만 쓰고, 밖으로 보내지 않습니다.",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val lines = TripRepository.lines(this)
+        val groups = TripRepository.groups(this)
         val sensors = SensorAvailability.of(this)
+        val stats = TripRepository.stats(this)
+        TripRepository.loadFavorites(this)
         setContent {
             val context = LocalContext.current
             val scheme = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
             MaterialTheme(colorScheme = scheme) {
                 val state by TripRepository.state.collectAsStateWithLifecycle()
+                val favorites by TripRepository.favorites.collectAsStateWithLifecycle()
                 AppScreen(
-                    lines = lines,
+                    groups = groups,
                     sensors = sensors,
+                    stats = stats,
                     state = state,
-                    onStart = ::requestStart,
+                    favorites = favorites,
+                    onToggleFavorite = { TripRepository.toggleFavorite(this, it) },
+                    onMoveFavoriteUp = { TripRepository.moveFavoriteUp(this, it) },
+                    onBoard = ::requestBoard,
                     onStop = { TrackingService.stop(this) },
                     onSetStation = { k -> TrackingService.setCurrentStation(this, k) },
+                    onSetAlight = { k -> TrackingService.setAlight(this, k) },
                     onClear = { TripRepository.clear() },
                 )
             }
         }
     }
 
-    private fun requestStart(request: StartRequest) {
+    private fun requestBoard(arrival: BoardArrival) {
         val needed = listOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
@@ -64,14 +77,17 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.ACTIVITY_RECOGNITION,
         ).filterNot(::granted)
         if (needed.isEmpty()) {
-            startTrip(request)
+            startTrip(arrival)
         } else {
-            pendingStart = request
+            pendingBoard = arrival
             permissionLauncher.launch(needed.toTypedArray())
         }
     }
 
-    private fun startTrip(r: StartRequest) = TrackingService.start(this, r.lineId, r.fromIdx, r.toIdx, r.direction, r.express)
+    private fun startTrip(a: BoardArrival) {
+        val r = a.route
+        TrackingService.start(this, r.line.id, r.stationIdx.first(), r.stationIdx.last(), r.direction, r.express)
+    }
 
     private fun granted(permission: String) =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
