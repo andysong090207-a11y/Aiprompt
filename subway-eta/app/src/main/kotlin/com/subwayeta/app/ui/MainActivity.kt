@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startTrip(r: StartRequest) = TrackingService.start(this, r.lineId, r.fromIdx, r.toIdx, r.direction)
+    private fun startTrip(r: StartRequest) = TrackingService.start(this, r.lineId, r.fromIdx, r.toIdx, r.direction, r.express)
 
     private fun granted(permission: String) =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED

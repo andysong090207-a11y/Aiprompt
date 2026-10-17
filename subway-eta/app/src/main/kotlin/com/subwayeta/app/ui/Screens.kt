@@ -57,7 +57,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 
-data class StartRequest(val lineId: String, val fromIdx: Int, val toIdx: Int, val direction: Direction?)
+data class StartRequest(val lineId: String, val fromIdx: Int, val toIdx: Int, val direction: Direction?, val express: Boolean)
 
 private val clockFormat = DateTimeFormatter.ofPattern("HH:mm:ss")
 
@@ -100,7 +100,8 @@ fun AppScreen(
 private fun SetupScreen(lines: List<Line>, sensors: SensorAvailability, onStart: (StartRequest) -> Unit, modifier: Modifier) {
     var lineIdx by rememberSaveable { mutableIntStateOf(0) }
     val line = lines[lineIdx.coerceIn(lines.indices)]
-    val names = line.stations.map { it.name }
+    var express by rememberSaveable(lineIdx) { mutableStateOf(false) }
+    val names = line.stations.map { if (express && it.expressStop) "${it.name} (급행)" else it.name }
     var from by rememberSaveable(lineIdx) { mutableIntStateOf(0) }
     var to by rememberSaveable(lineIdx) { mutableIntStateOf(minOf(5, names.lastIndex)) }
     // 0: 자동(가까운 쪽), 1: FORWARD, 2: BACKWARD
@@ -110,7 +111,9 @@ private fun SetupScreen(lines: List<Line>, sensors: SensorAvailability, onStart:
         2 -> Direction.BACKWARD
         else -> null
     }
-    val route = remember(line, from, to, direction) { runCatching { Route.plan(line, from, to, direction) }.getOrNull() }
+    val route = remember(line, from, to, direction, express) {
+        runCatching { Route.plan(line, from, to, direction, express) }.getOrNull()
+    }
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("지하철 도착 예측", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -130,18 +133,31 @@ private fun SetupScreen(lines: List<Line>, sensors: SensorAvailability, onStart:
                 FilterChip(selected = dirChoice == 2, onClick = { dirChoice = 2 }, label = { Text(line.backwardName) })
             }
         }
+        if (line.hasExpress) {
+            Text("열차 종류", style = MaterialTheme.typography.labelMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !express, onClick = { express = false }, label = { Text("일반") })
+                FilterChip(selected = express, onClick = { express = true }, label = { Text("급행") })
+            }
+        }
         if (route != null) {
             val preview = remember(route) { Predictor.predict(route, TravelStats(), Phase.AtStation(0, 0L), 0L) }
             val totalSec = (((preview.destinationArrivalAt ?: 0L) - (preview.departureAt ?: 0L)) / 1000.0).roundToInt()
             Text(
-                "${line.directionName(route.direction)} · ${route.lastK}개 역 · 기본값 기준 약 ${totalSec / 60}분 ${totalSec % 60}초",
+                "${line.directionName(route.direction)}${if (route.express) " 급행" else ""} · ${route.lastK}개 역 · " +
+                    "기본값 기준 약 ${totalSec / 60}분 ${totalSec % 60}초",
                 style = MaterialTheme.typography.bodyMedium,
             )
         } else {
-            Text("출발역과 도착역을 다르게 고르세요.", color = MaterialTheme.colorScheme.error)
+            val reason = when {
+                from == to -> "출발역과 도착역을 다르게 고르세요."
+                express -> "급행은 급행 정차역(이름 옆에 '급행' 표시)끼리만 고를 수 있습니다."
+                else -> "이 방향으로는 갈 수 없는 경로입니다."
+            }
+            Text(reason, color = MaterialTheme.colorScheme.error)
         }
         Button(
-            onClick = { onStart(StartRequest(line.id, from, to, direction)) },
+            onClick = { onStart(StartRequest(line.id, from, to, direction, express)) },
             enabled = route != null,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("승강장에서 시작") }
@@ -206,7 +222,7 @@ private fun TripScreen(
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-            "${route.line.name} ${route.line.directionName(route.direction)}",
+            "${route.line.name} ${route.line.directionName(route.direction)}${if (route.express) " 급행" else ""}",
             color = lineColor(route.line),
             fontWeight = FontWeight.Bold,
         )

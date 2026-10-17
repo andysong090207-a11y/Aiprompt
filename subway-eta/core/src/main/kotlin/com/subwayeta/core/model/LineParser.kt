@@ -10,7 +10,7 @@ package com.subwayeta.core.model
  * @circular=true
  * @forward=내선순환
  * @backward=외선순환
- * # id,이름,위도,경도,지상(0/1),기본정차초,다음역까지주행초
+ * # id,이름,위도,경도,지상(0/1),기본정차초,다음역까지주행초,급행정차(0/1, 생략 가능)
  * 0201,시청,37.5657,126.9769,0,30,90
  * ```
  *
@@ -41,6 +41,7 @@ object LineParser {
                         lon = c[3].toDouble(),
                         aboveGround = c[4] == "1",
                         defaultDwellSec = c[5].toDouble(),
+                        expressStop = c.getOrNull(7) == "1",
                     )
                     c.getOrNull(6)?.takeIf { it.isNotEmpty() }?.let { runs += it.toDouble() }
                 }

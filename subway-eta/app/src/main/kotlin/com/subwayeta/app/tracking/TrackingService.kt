@@ -128,7 +128,13 @@ class TrackingService : Service(), SensorEventListener {
             return
         }
         val direction = intent.getStringExtra(EXTRA_DIRECTION)?.let { Direction.valueOf(it) }
-        val route = Route.plan(line, intent.getIntExtra(EXTRA_FROM, 0), intent.getIntExtra(EXTRA_TO, 1), direction)
+        val route = runCatching {
+            Route.plan(line, intent.getIntExtra(EXTRA_FROM, 0), intent.getIntExtra(EXTRA_TO, 1), direction, intent.getBooleanExtra(EXTRA_EXPRESS, false))
+        }.getOrElse {
+            Log.e(TAG, "경로를 만들 수 없음", it)
+            stopSelf()
+            return
+        }
 
         try {
             startForeground(NOTIFICATION_ID, tripNotification("${route.station(route.lastK).name} 도착 예측 준비 중", null, null), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
@@ -411,15 +417,17 @@ class TrackingService : Service(), SensorEventListener {
         const val EXTRA_FROM = "from"
         const val EXTRA_TO = "to"
         const val EXTRA_DIRECTION = "direction"
+        const val EXTRA_EXPRESS = "express"
         const val EXTRA_STATION_K = "station_k"
 
-        fun start(context: Context, lineId: String, fromIdx: Int, toIdx: Int, direction: Direction?) {
+        fun start(context: Context, lineId: String, fromIdx: Int, toIdx: Int, direction: Direction?, express: Boolean) {
             val i = Intent(context, TrackingService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_LINE, lineId)
                 .putExtra(EXTRA_FROM, fromIdx)
                 .putExtra(EXTRA_TO, toIdx)
                 .putExtra(EXTRA_DIRECTION, direction?.name)
+                .putExtra(EXTRA_EXPRESS, express)
             ContextCompat.startForegroundService(context, i)
         }
 
